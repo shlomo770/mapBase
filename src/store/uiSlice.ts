@@ -11,6 +11,8 @@ export type DrawMode =
   | 'select'
   | 'edit';
 
+export type MapType = 'default' | 'satellite' | 'terrain' | 'dark' | 'osm';
+
 interface UIState {
   activeDrawMode: DrawMode;
   rightSidebarOpen: boolean;
@@ -21,6 +23,7 @@ interface UIState {
   showCoordinates: boolean;
   welcomeScreenClosed: boolean;
   exampleFormOpen: boolean;
+  mapType: MapType;
 }
 
 const initialState: UIState = {
@@ -32,7 +35,8 @@ const initialState: UIState = {
   measurementMode: false,
   showCoordinates: true,
   welcomeScreenClosed: false,
-  exampleFormOpen: false
+  exampleFormOpen: false,
+  mapType: 'default'
 };
 
 const uiSlice = createSlice({
@@ -70,11 +74,14 @@ const uiSlice = createSlice({
     },
     setExampleFormOpen: (state, action: PayloadAction<boolean>) => {
       state.exampleFormOpen = action.payload;
+    },
+    setMapType: (state, action: PayloadAction<MapType>) => {
+      state.mapType = action.payload;
     }
   }
 });
 
-export const { setDrawMode, setRightSidebarOpen, setEditingEntity, setDarkMode, setMeasurementMode, setShowCoordinates, setWelcomeScreenClosed, setExampleFormOpen } = uiSlice.actions;
+export const { setDrawMode, setRightSidebarOpen, setEditingEntity, setDarkMode, setMeasurementMode, setShowCoordinates, setWelcomeScreenClosed, setExampleFormOpen, setMapType } = uiSlice.actions;
 export default uiSlice.reducer;
 
 

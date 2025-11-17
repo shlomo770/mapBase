@@ -2,6 +2,7 @@ import React from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import type { RootState } from '../../store';
 import { setDrawMode, DrawMode } from '../../store/uiSlice';
+import { MapTypeSelector } from '../map/MapTypeSelector';
 
 const buttons: { id: DrawMode; label: string }[] = [
   { id: 'select', label: 'Select' },
@@ -33,6 +34,9 @@ export const DrawToolbar: React.FC = () => {
           {btn.label}
         </button>
       ))}
+      <div className="mt-2">
+        <MapTypeSelector />
+      </div>
     </div>
   );
 };

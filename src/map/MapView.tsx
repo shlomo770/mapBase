@@ -1,9 +1,22 @@
+/**
+ * MapView Component
+ * 
+ * Main map component that handles:
+ * - Map initialization with MapLibre GL
+ * - Dynamic style switching while preserving entities
+ * - Entity rendering (points, lines, polygons, circles, rectangles)
+ * - Drawing tools integration
+ * - Measurement tools
+ * - Edit mode with vertex manipulation
+ */
+
 import React, { useEffect, useRef, useState, useMemo } from 'react';
 import maplibregl, { Map as MlMap } from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 import { useSelector } from 'react-redux';
 import type { RootState } from '../store';
 import { circleToPolygon } from './geometry';
+import type { AnyEntity } from '../store/entitiesSlice';
 import { useMapDrawing } from './useMapDrawing';
 import { useMeasurement } from './useMeasurement';
 import { NavigationControls } from '../components/toolbar/NavigationControls';
@@ -12,29 +25,183 @@ import { MeasurementPanel } from '../components/map/MeasurementPanel';
 import { AdvancedTools } from '../components/toolbar/AdvancedTools';
 import { useKeyboardShortcuts } from '../hooks/useKeyboardShortcuts';
 
+// Map style URLs (using free Carto basemaps)
 const DEFAULT_STYLE = 'https://demotiles.maplibre.org/style.json';
+const DARK_STYLE = 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
+const LIGHT_STYLE = 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json';
+const VOYAGER_STYLE = 'https://basemaps.cartocdn.com/gl/voyager-gl-style/style.json';
+
+/**
+ * Get map style URL based on map type
+ * Uses free Carto basemaps that don't require API keys
+ */
+const getMapStyle = (mapType: string): string => {
+  switch (mapType) {
+    case 'satellite':
+    case 'terrain':
+      return VOYAGER_STYLE; // Voyager style with more detail
+    case 'dark':
+      return DARK_STYLE; // Dark theme basemap
+    case 'osm':
+      return LIGHT_STYLE; // Light theme basemap
+    case 'default':
+    default:
+      return DEFAULT_STYLE; // MapLibre demo tiles
+  }
+};
+
+/**
+ * Add all necessary map sources and layers
+ * This function is idempotent - it only adds sources/layers that don't already exist
+ * 
+ * Layers:
+ * - entities: User-created geographic features (points, lines, polygons)
+ * - draft: Temporary preview while drawing
+ * - vertices: Edit mode vertex handles
+ */
+const addMapLayers = (map: MlMap) => {
+  // Add entities source if it doesn't exist
+  if (!map.getSource('entities')) {
+    map.addSource('entities', {
+      type: 'geojson',
+      data: {
+        type: 'FeatureCollection',
+        features: []
+      }
+    });
+  }
+
+  // Add entity layers if they don't exist
+  if (!map.getLayer('entities-fill')) {
+    map.addLayer({
+      id: 'entities-fill',
+      type: 'fill',
+      source: 'entities',
+      filter: ['==', ['get', 'fill'], true],
+      paint: {
+        'fill-color': ['get', 'color'],
+        'fill-opacity': 0.25
+      }
+    });
+  }
+
+  if (!map.getLayer('entities-line')) {
+    map.addLayer({
+      id: 'entities-line',
+      type: 'line',
+      source: 'entities',
+      paint: {
+        'line-color': ['get', 'color'],
+        'line-width': 2
+      }
+    });
+  }
+
+  if (!map.getLayer('entities-point')) {
+    map.addLayer({
+      id: 'entities-point',
+      type: 'circle',
+      source: 'entities',
+      filter: ['==', ['geometry-type'], 'Point'],
+      paint: {
+        'circle-radius': 6,
+        'circle-color': ['get', 'color'],
+        'circle-stroke-width': 1,
+        'circle-stroke-color': '#000000'
+      }
+    });
+  }
+
+  // Add draft source for drawing preview
+  if (!map.getSource('draft')) {
+    map.addSource('draft', {
+      type: 'geojson',
+      data: {
+        type: 'FeatureCollection',
+        features: []
+      }
+    });
+  }
+
+  if (!map.getLayer('draft-line')) {
+    map.addLayer({
+      id: 'draft-line',
+      type: 'line',
+      source: 'draft',
+      paint: {
+        'line-color': '#ff0000',
+        'line-width': 2,
+        'line-dasharray': [2, 2]
+      }
+    });
+  }
+
+  if (!map.getLayer('draft-point')) {
+    map.addLayer({
+      id: 'draft-point',
+      type: 'circle',
+      source: 'draft',
+      paint: {
+        'circle-radius': 4,
+        'circle-color': '#ff0000',
+        'circle-stroke-width': 1,
+        'circle-stroke-color': '#ffffff'
+      }
+    });
+  }
+
+  // Add vertices source for edit mode
+  if (!map.getSource('vertices')) {
+    map.addSource('vertices', {
+      type: 'geojson',
+      data: {
+        type: 'FeatureCollection',
+        features: []
+      }
+    });
+  }
+
+  if (!map.getLayer('vertices-point')) {
+    map.addLayer({
+      id: 'vertices-point',
+      type: 'circle',
+      source: 'vertices',
+      paint: {
+        'circle-radius': 8,
+        'circle-color': '#00ff00',
+        'circle-stroke-width': 2,
+        'circle-stroke-color': '#000000'
+      }
+    });
+  }
+};
 
 export const MapView: React.FC = () => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MlMap | null>(null);
   const [mapLoaded, setMapLoaded] = useState(false);
+  const previousMapTypeRef = useRef<string>('default');
+  const isStyleChangingRef = useRef<boolean>(false);
+  const entitiesRef = useRef<AnyEntity[]>([]);
 
   const allIds = useSelector((s: RootState) => s.entities.allIds);
   const byId = useSelector((s: RootState) => s.entities.byId);
   
   const entities = useMemo(() => {
-    return allIds
+    const result = allIds
       .map(id => byId[id])
       .filter(e => e && e.visible);
+    entitiesRef.current = result;
+    return result;
   }, [allIds, byId]);
 
-  // init map
+  // Initialize map on component mount
   useEffect(() => {
     if (!containerRef.current || mapRef.current) return;
 
     const map = new maplibregl.Map({
       container: containerRef.current,
-      style: DEFAULT_STYLE,
+      style: getMapStyle('default'),
       center: [35, 31],
       zoom: 7,
       pitch: 0,
@@ -46,99 +213,7 @@ export const MapView: React.FC = () => {
     map.doubleClickZoom.disable();
 
     map.on('load', () => {
-      map.addSource('entities', {
-        type: 'geojson',
-        data: {
-          type: 'FeatureCollection',
-          features: []
-        }
-      });
-
-      map.addLayer({
-        id: 'entities-fill',
-        type: 'fill',
-        source: 'entities',
-        filter: ['==', ['get', 'fill'], true],
-        paint: {
-          'fill-color': ['get', 'color'],
-          'fill-opacity': 0.25
-        }
-      });
-
-      map.addLayer({
-        id: 'entities-line',
-        type: 'line',
-        source: 'entities',
-        paint: {
-          'line-color': ['get', 'color'],
-          'line-width': 2
-        }
-      });
-
-      map.addLayer({
-        id: 'entities-point',
-        type: 'circle',
-        source: 'entities',
-        filter: ['==', ['geometry-type'], 'Point'],
-        paint: {
-          'circle-radius': 6,
-          'circle-color': ['get', 'color'],
-          'circle-stroke-width': 1,
-          'circle-stroke-color': '#000000'
-        }
-      });
-
-      map.addSource('draft', {
-        type: 'geojson',
-        data: {
-          type: 'FeatureCollection',
-          features: []
-        }
-      });
-
-      map.addLayer({
-        id: 'draft-line',
-        type: 'line',
-        source: 'draft',
-        paint: {
-          'line-color': '#ff0000',
-          'line-width': 2,
-          'line-dasharray': [2, 2]
-        }
-      });
-
-      map.addLayer({
-        id: 'draft-point',
-        type: 'circle',
-        source: 'draft',
-        paint: {
-          'circle-radius': 4,
-          'circle-color': '#ff0000',
-          'circle-stroke-width': 1,
-          'circle-stroke-color': '#ffffff'
-        }
-      });
-
-      map.addSource('vertices', {
-        type: 'geojson',
-        data: {
-          type: 'FeatureCollection',
-          features: []
-        }
-      });
-
-      map.addLayer({
-        id: 'vertices-point',
-        type: 'circle',
-        source: 'vertices',
-        paint: {
-          'circle-radius': 8,
-          'circle-color': '#00ff00',
-          'circle-stroke-width': 2,
-          'circle-stroke-color': '#000000'
-        }
-      });
-
+      addMapLayers(map);
       setMapLoaded(true);
     });
 
@@ -149,24 +224,22 @@ export const MapView: React.FC = () => {
     };
   }, []);
 
+  // Custom hooks for map interactions
   const { draftCoords } = useMapDrawing(mapLoaded ? mapRef.current : null);
   const { measurementPoints, distances, totalDistance } = useMeasurement(mapLoaded ? mapRef.current : null);
+  useKeyboardShortcuts();
+
+  // UI state selectors
   const drawMode = useSelector((s: RootState) => s.ui.activeDrawMode);
   const selectedEntityId = useSelector((s: RootState) => s.entities.selectedId);
   const darkMode = useSelector((s: RootState) => s.ui.darkMode);
   const measurementMode = useSelector((s: RootState) => s.ui.measurementMode);
   const showCoordinates = useSelector((s: RootState) => s.ui.showCoordinates);
-  
-  useKeyboardShortcuts();
+  const mapType = useSelector((s: RootState) => s.ui.mapType);
 
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!map) return;
-
-    const src = map.getSource('entities') as maplibregl.GeoJSONSource | undefined;
-    if (!src) return;
-
-    const features: GeoJSON.Feature[] = entities.map(e => {
+  // Helper function to convert entities to GeoJSON features
+  const entitiesToFeatures = (entitiesList: typeof entities): GeoJSON.Feature[] => {
+    return entitiesList.map(e => {
       const baseProps = {
         id: e.id,
         kind: e.kind,
@@ -230,7 +303,6 @@ export const MapView: React.FC = () => {
         };
       }
 
-      // fallback
       return {
         type: 'Feature',
         geometry: {
@@ -240,13 +312,81 @@ export const MapView: React.FC = () => {
         properties: baseProps
       };
     });
+  };
 
-    src.setData({
-      type: 'FeatureCollection',
-      features
-    });
-  }, [entities]);
+  // Handle map style changes while preserving entities
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapLoaded) return;
 
+    // Only change style if it's different from previous
+    if (previousMapTypeRef.current === mapType) return;
+
+    const newStyleUrl = getMapStyle(mapType);
+    previousMapTypeRef.current = mapType;
+    isStyleChangingRef.current = true;
+
+    // Save current view state
+    const center = map.getCenter();
+    const zoom = map.getZoom();
+    const bearing = map.getBearing();
+    const pitch = map.getPitch();
+
+    // Change map style
+    map.setStyle(newStyleUrl);
+
+    // Wait for style to fully load and map to be idle
+    const onIdle = () => {
+      // Remove the listener
+      map.off('idle', onIdle);
+      
+      // Add layers
+      addMapLayers(map);
+
+      // Restore view state
+      map.setCenter(center);
+      map.setZoom(zoom);
+      map.setBearing(bearing);
+      map.setPitch(pitch);
+
+      // Update entities
+      const entitiesSrc = map.getSource('entities') as maplibregl.GeoJSONSource | undefined;
+      if (entitiesSrc) {
+        const features = entitiesToFeatures(entitiesRef.current);
+        entitiesSrc.setData({
+          type: 'FeatureCollection',
+          features
+        });
+      }
+      
+      // Release the lock
+      isStyleChangingRef.current = false;
+    };
+    
+    map.once('idle', onIdle);
+    
+    return () => {
+      map.off('idle', onIdle);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mapType, mapLoaded]);
+
+  // Update entities whenever they change
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapLoaded || isStyleChangingRef.current) return;
+
+    const src = map.getSource('entities') as maplibregl.GeoJSONSource | undefined;
+    if (src) {
+      const features = entitiesToFeatures(entities);
+      src.setData({
+        type: 'FeatureCollection',
+        features
+      });
+    }
+  }, [entities, mapLoaded]);
+
+  // Update draft preview while drawing
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapLoaded) return;
@@ -311,6 +451,7 @@ export const MapView: React.FC = () => {
     });
   }, [draftCoords, drawMode, mapLoaded]);
 
+  // Update vertices for edit mode
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapLoaded) return;
@@ -409,16 +550,13 @@ export const MapView: React.FC = () => {
     });
   }, [drawMode, selectedEntityId, entities, mapLoaded]);
 
+  // Apply dark mode filter
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !mapLoaded) return;
     
     const container = map.getContainer();
-    if (darkMode) {
-      container.style.filter = 'brightness(0.6) contrast(1.2)';
-    } else {
-      container.style.filter = '';
-    }
+    container.style.filter = darkMode ? 'brightness(0.6) contrast(1.2)' : '';
   }, [darkMode, mapLoaded]);
 
   return (
